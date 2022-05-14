@@ -1,0 +1,151 @@
+---
+
+- name: "konfiguracja plikow dla klastra"
+  hosts: localhost
+  connection: local
+
+  vars:
+    # katalog dla konfiguracji klastrow
+    clusters_dir: '/root/k8s-clusters'
+    cluster_name: 'k8s-m01'
+    # data deploymentu i nowego kubespray
+    date: '21-07-2021'
+    # repo kubespray
+    kubespray_repo: 'https://github.com/kubernetes-sigs/kubespray.git'
+    kubespray_dir: 'kubespray'
+    kubespray_tag: 'v2.16.0'
+    kubespray_inv: "inventory/mycluster"
+    # proxy squid
+    #proxy_squid: '192.168.0.254:8080'
+    # zmienne dla plikow konfiguracyjnych
+    proxy_path: 'kubespray/inventory/mycluster/group_vars/all/all.yml'
+    addon_path: 'kubespray/inventory/mycluster/group_vars/k8s_cluster/addons.yml'
+    cluster_path: 'kubespray/inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml'
+    etcd_path: 'kubespray/inventory/mycluster/group_vars/etcd.yml'
+
+    cluster_inventory:
+      - file: hosts.yaml
+      - file: inventory.ini
+
+#    proxy:
+#      - line: '^## apiserver_loadbalancer_domain_name: "elb.some.domain"'
+#        change: 'apiserver_loadbalancer_domain_name: "k8s-p04"'
+#      - line: '^# loadbalancer_apiserver:'
+#        change: 'loadbalancer_apiserver:'
+#      - line: '^#   address: 1.2.3.4'
+#        change: '   address: 10.151.105.182'
+#      - line: '^#   port: 1234'
+#        change: '   port: 8787'
+
+    addon:
+      # helm
+      - line: '^helm_enabled: false'
+        change: 'helm_enabled: true'
+      # metric server
+      - line: '^metrics_server_enabled: false'
+        change: 'metrics_server_enabled: true'
+      - line: '^# metrics_server_kubelet_insecure_tls: true'
+        change: 'metrics_server_kubelet_insecure_tls: true'
+      - line: '^# metrics_server_kubelet_preferred_address_types: "InternalIP"'
+        change: 'metrics_server_kubelet_preferred_address_types: "InternalIP"'
+      # metallb
+      - line: '^metallb_enabled: false'
+        change: 'metallb_enabled: true'
+      - line: '^# metallb_ip_range:'
+        change: 'metallb_ip_range:'
+      - line: '^#   - "10.5.0.50-10.5.0.99"'
+        change: '  - "192.168.56.141-192.168.56.145"'
+      - line: '^# metallb_protocol: "layer2"'
+        change: 'metallb_protocol: "layer2"'
+    cluster:
+      # Siec wewnetrzna dla serwisow
+      - line: '^kube_service_addresses: 10.233.0.0/18'
+        change: 'kube_service_addresses: 10.238.0.0/18'
+      - line: '^kube_pods_subnet: 10.233.64.0/18'
+        change: 'kube_pods_subnet: 10.238.64.0/18'
+      # Unikniecie odpowiedzi z kube-ipvs0 dla MetalLB
+      - line: '^kube_proxy_strict_arp: false'
+        change: 'kube_proxy_strict_arp: true'
+      # localnodeDNS
+      - line: '^nodelocaldns_ip: 169.254.25.10'
+        change: 'nodelocaldns_ip: 169.254.25.15'
+      # Ustawienie CNI
+      - line: '^kube_network_plugin: calico'
+        change: 'kube_network_plugin: calico'
+      # Cluster name
+      - line: '^cluster_name: cluster.local'
+        change: 'cluster_name: cluster.local'
+      # Container manager
+      - line: '^container_manager: docker'
+        change: 'container_manager: containerd'
+
+    etcd:
+      # Sposób deploymentu ETCD - jak containerd mamy musi byc ustawiony jako: host
+      - line: '^etcd_deployment_type: docker'
+        change: 'etcd_deployment_type: host'
+
+  tasks:
+
+  - name: Katalog z data
+    file:
+      path: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}"
+      state: directory
+
+  - name: kopiowanie inventory
+    copy:
+      src: "{{ clusters_dir }}/{{ cluster_name }}/{{ item.file }}"
+      dest: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ kubespray_dir }}/{{ kubespray_inv }}"
+      remote_src: yes
+    with_items:
+      - "{{ cluster_inventory }}"
+
+#  - name: konfiguracja loadbalancera
+#    lineinfile:
+#      path: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ proxy_path }}"
+#      regexp: "{{ item.line }}"
+#      line: "{{ item.change }}"
+#    with_items:
+#      - "{{ proxy }}"
+
+  - name: konfiguracja helm metallb metricserver
+    lineinfile:
+      path: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ addon_path }}"
+      regexp: "{{ item.line }}"
+      line: "{{ item.change }}"
+    with_items:
+      - "{{ addon }}"
+
+  - name: konfiguracja klastra
+    lineinfile:
+      path: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ cluster_path }}"
+      regexp: "{{ item.line }}"
+      line: "{{ item.change }}"
+    with_items:
+      - "{{ cluster }}"
+
+  - name: konfiguracja ETCD
+    lineinfile:
+      path: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ etcd_path }}"
+      regexp: "{{ item.line }}"
+      line: "{{ item.change }}"
+    with_items:
+      - "{{ etcd }}"
+
+
+  - name: klowanie repo i ustawienie taga
+    git:
+      repo: "{{ kubespray_repo }}"
+      dest: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ kubespray_dir }}"
+      version: "{{ kubespray_tag }}"
+    environment:
+      HTTP_PROXY: "{{ proxy_squid }}"
+      HTTPS_PROXY: "{{ proxy_squid }}"
+
+  - name: przygotowanie srodowiska Kubespray
+    shell: |
+      sudo pip3 install -r requirements.txt
+      cp -rfp inventory/sample inventory/mycluster
+      declare -a IPS=(10.10.1.3 10.10.1.4 10.10.1.5)
+      CONFIG_FILE=inventory/mycluster/hosts.yaml python3 contrib/inventory_builder/inventory.py ${IPS[@]}
+    args:
+      chdir: "{{ clusters_dir }}/{{ cluster_name }}/{{ date }}/{{ kubespray_dir }}"
